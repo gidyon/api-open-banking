@@ -1,12 +1,24 @@
-package model
+package user
 
 import (
 	"context"
+	"github.com/Sirupsen/logrus"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"strings"
 )
+
+var db *usersDatabase
+
+func init() {
+	userDB, err := newUsersDB("users.db")
+	if err != nil {
+		logrus.Fatalln(err)
+	}
+
+	db = userDB
+}
 
 // User contains data for API user
 type User struct {
@@ -18,9 +30,8 @@ type User struct {
 	Password  string `json:"password,omitempty"`
 }
 
-// Register registers a user. Returns USerID on successful registration and error object
+// Register registers a user
 func (user *User) Register() (string, error) {
-	// Validate user credentials. Check that credentials not empty
 	switch {
 	// We can do more here like making sure its a valid email
 	case strings.Trim(user.Email, " ") == "":
@@ -31,45 +42,55 @@ func (user *User) Register() (string, error) {
 		return "", errMissingCredential("user password")
 	}
 
-	// We create a unique user id
 	user.UserID = uuid.New().String()
 
-	// We store the credentials in file for simplicity. We could replace it with mysql db.
-	err := AddUserToFileDB(user)
+	_, data := db.userExist(user)
+	if data != "" {
+		return "", errors.Errorf("user with %s already exists", data)
+	}
+
+	err := db.addUser(user)
 	if err != nil {
 		return "", err
 	}
 
+	// user id and nil error
 	return user.UserID, nil
 }
 
-// Login authenticates user. Creates a jwt token for user on successful login and error object
-func (user *User) Login() (string, error) {
-	// We validate that credentials is not empty
+// Login authenticates user
+func Login(userID, password string) (string, error) {
 	switch {
-	// We can do more here like making sure its a valid email
-	case strings.Trim(user.Email, " ") == "":
-		return "", errMissingCredential("user email")
-	case strings.Trim(user.Phone, " ") == "":
-		return "", errMissingCredential("user phone")
-	case strings.Trim(user.Password, " ") == "":
-		return "", errMissingCredential("user password")
+	case strings.Trim(userID, " ") == "":
+		return "", errMissingCredential("user id")
+	case strings.Trim(password, " ") == "":
+		return "", errMissingCredential("password")
 	}
 
-	// Authenticate user credentials
-	err := AuthenticateUserInFileDB(user)
+	user, err := db.getUser(userID)
 	if err != nil {
 		return "", err
 	}
 
-	return GenToken(context.Background(), user)
+	if user.Password != password {
+		return "", errors.New("password incorrect")
+	}
+
+	// returns jwt token and error
+	return genToken(context.Background(), user)
 }
 
-// Updateuser updates the user of an existing user
-func (user *User) Updateuser(newUser *User) error {
-	return nil
+// UpdateUser updates data of an existing user
+func UpdateUser(userID string, newUser *User) error {
+	return db.updateUser(userID, newUser)
 }
 
+// GetUser gets a user data
+func GetUser(userID string) (*User, error) {
+	return db.getUser(userID)
+}
+
+// JWT section:
 var (
 	signingKey    = []byte("MySecretSoupRecipeOrAvengersEndGame")
 	signingMethod = jwt.SigningMethodHS256
@@ -81,8 +102,8 @@ type JWTClaims struct {
 	jwt.StandardClaims
 }
 
-// GenToken json web token
-func GenToken(
+// genToken json web token
+func genToken(
 	ctx context.Context, user *User,
 ) (string, error) {
 	token := jwt.NewWithClaims(signingMethod, JWTClaims{
@@ -97,8 +118,8 @@ func GenToken(
 	return token.SignedString(signingKey)
 }
 
-// ParseToken parses a jwt token to claims or fail otherwise
-func ParseToken(tokenString string) (*JWTClaims, error) {
+// parseToken parses a jwt token to claims or fail otherwise
+func parseToken(tokenString string) (*JWTClaims, error) {
 	token, err := jwt.ParseWithClaims(
 		tokenString,
 		&JWTClaims{},
